@@ -1,0 +1,489 @@
+---
+title: "Untitled"
+author: "Eunice Chidiebube Egeonu"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+        smooth_scroll: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, error = F)
+```
+
+## Tools for Analysis
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(showtext)
+library(ggtext)
+library(cohorts)
+library(arules)
+library(arulesViz)
+library(data.table)
+
+font_add_google(name = "Lato", family = "Lato")
+
+theme_set(
+  theme_minimal() +
+    theme(text = element_text(family = "Lato"))
+)
+
+```
+
+## Data Loading and Cleaning
+
+```{r}
+data_path <- fs::dir_ls("data/")
+
+load_and_clean <- function(x) {
+  vroom::vroom(x) %>% ## Loads data fast in R
+    janitor::clean_names() %>% ## Converts column name to snake case (i.e 'Customer ID' = customer_id)
+    mutate(across(where(is.character), factor))
+}
+
+data <- map(data_path, load_and_clean)
+```
+
+Transaction table: We don't need records showing 0 sales or 0 quantity
+
+```{r}
+tranx_tbl <- data$`data/transaction_data.csv` %>%
+  filter(sales_value > 0)
+
+demographics_tbl <- data$`data/hh_demographic.csv`
+
+coupon_redemption_tbl <- data$`data/coupon_redempt.csv`
+
+coupon_tbl <- data$`data/coupon.csv`
+
+campaign_desc_tbl <- data$`data/campaign_desc.csv`
+
+campaign_table_tbl <- data$`data/campaign_table.csv`
+
+product_tbl <- data$`data/product.csv`
+```
+
+## Gather data
+
+### Coupon + Sales
+
+```{r}
+coupon_sales_tbl <-
+  coupon_tbl %>% ## Dataframe with coupon info
+  inner_join(product_tbl, by = "product_id") %>% # Get Details of products that campaign were ran on
+  inner_join(tranx_tbl, by = "product_id") %>% # Get information of the sales on those campaigns
+  inner_join(coupon_redemption_tbl,
+    by = c("household_key", "day", "coupon_upc", "campaign")
+  ) %>% ## Streamline to customers who redeemed those coupons
+  filter(coupon_disc != 0 | retail_disc != 0)
+```
+
+### Data for Cohort Analysis
+
+```{r}
+## For cohort analysis, we just need the customer ID and date of purchase
+## For data: We define our date to start from "2012/01/01" -> Day 1 just for the purpose of understanding customer retention. It doesn't mean the store started on that said date
+cohort_tbl <-
+  tranx_tbl %>%
+  select(household_key, day) %>%
+  mutate(date = ymd("2012/01/01") + days(day - 1), .before = household_key) %>%
+  select(-day)
+```
+
+## Custom Plots
+
+### Duration of Campaigns
+
+```{r}
+plot_1 <-
+  campaign_desc_tbl %>%
+  mutate(
+    duration = end_day - start_day,
+    campaign = paste0("Campaign-", campaign) %>%
+      fct_reorder(duration)
+  ) %>%
+  select(-ends_with("_day")) %>%
+  ggplot(aes(duration, campaign, col = description, fill = description)) +
+  geom_segment(aes(x = 0, xend = duration, yend = campaign),
+    lineend = "round",
+    lwd = 6
+  ) +
+  geom_text(aes(label = duration),
+    col = "white", family = "Quicksand",
+    hjust = 1, fontface = "bold"
+  ) +
+  labs(
+    title = "Duration of Campaigns",
+    subtitle = "Campaigns in <span style = 'color:#0e7c7b;'>**TypeC**</span> usually run for longer periods while <span style = 'color:#918450;'>**TypeB**</span> campaign runs for shorter periods",
+    x = "Duration (days)",
+    y = "",
+    fill = "",
+    col = ""
+  ) +
+  scale_color_manual(values = c(
+    "TypeA" = "#ffb563",
+    "TypeB" = "#918450",
+    "TypeC" = "#0e7c7b"
+  )) +
+  theme(
+    plot.subtitle = element_markdown(),
+    plot.title = element_text(size = 28, face = "bold"),
+    plot.title.position = "plot",
+    legend.position = "top",
+    legend.justification = "right"
+  )
+
+plot_1
+```
+
+### Coupon Redemption by Income Groups
+```{r}
+coupon_usage_by_age <-
+  coupon_redemption_tbl %>%
+  distinct(household_key) %>%
+  inner_join(demographics_tbl) %>%
+  count(income_desc, name = "total_c") %>%
+  left_join(demographics_tbl %>%
+    count(income_desc, name = "total")) %>%
+  mutate(perc = total_c / total)
+
+coupon_usage_by_age$income_desc <-
+  factor(
+    coupon_usage_by_age$income_desc,
+    levels = c(
+      "Under 15K",
+      "15-24K",
+      "25-34K",
+      "35-49K",
+      "50-74K",
+      "75-99K",
+      "100-124K",
+      "125-149K",
+      "150-174K",
+      "175-199K",
+      "200-249K",
+      "250K+"
+    ),
+    ordered = T
+  )
+
+plot_4 <-
+  coupon_usage_by_age %>%
+  ggplot(aes(perc, income_desc)) +
+  geom_vline(
+    xintercept = 0.30,
+    size = 1.2,
+    col = "red"
+  ) +
+  geom_vline(
+    xintercept = 0.5,
+    size = 1.1,
+    col = "yellow"
+  ) +
+  geom_vline(
+    xintercept = 0.75,
+    size = 1.0,
+    col = "green"
+  ) +
+  geom_segment(
+    aes(x = 0, xend = 1, yend = income_desc),
+    lwd = 3.7,
+    lineend = "round",
+    col = "#2b2d42"
+  ) +
+  geom_segment(
+    aes(x = 0, xend = perc, yend = income_desc),
+    lwd = 2.5,
+    lineend = "round",
+    col = "white"
+  ) +
+  coord_flip() +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_discrete(expand = expansion(add = c(.5, 1))) +
+  annotate(
+    geom = "text",
+    x = 0.78,
+    y = 12.5,
+    label = "75%",
+    family = "quicksand",
+    size = 4,
+    fontface = "bold"
+  ) +
+  annotate(
+    geom = "text",
+    x = 0.53,
+    y = 12.5,
+    label = "50%",
+    family = "quicksand",
+    size = 4,
+    fontface = "bold"
+  ) +
+  annotate(
+    geom = "text",
+    x = 0.33,
+    y = 12.5,
+    label = "30%",
+    family = "quicksand",
+    size = 4,
+    fontface = "bold"
+  ) +
+  labs(
+    title = "Coupon Redemption by Income Groups",
+    subtitle = "The plot below shows the percentage coupon redemption by Income Groups",
+    x = NULL,
+    y = NULL,
+  ) +
+  theme(
+    axis.text.y = element_blank(),
+    plot.title = element_text(size = 28),
+    plot.title.position = "plot"
+  )
+
+plot_4
+```
+
+### Departments with the most redeemed coupons
+```{r}
+donut_chart_tbl <-
+  coupon_sales_tbl %>%
+  select(department) %>%
+  mutate(dept = fct_lump_prop(department, 0.05, other_level = "Others")) %>%
+  count(dept) %>%
+  mutate(ymax = cumsum(n))
+
+donut_chart_tbl$ymin <- c(0, head(donut_chart_tbl$ymax, n = -1))
+
+donut_chart_tbl$labelPosition <-
+  (donut_chart_tbl$ymax + donut_chart_tbl$ymin) / 2
+
+donut_chart_tbl$label <-
+  paste0(donut_chart_tbl$dept, "\n value: ", donut_chart_tbl$n)
+
+plot_5 <-
+  donut_chart_tbl %>%
+  ggplot(aes(
+    ymax = ymax,
+    ymin = ymin,
+    xmax = 4,
+    xmin = 3,
+    fill = dept
+  )) +
+  geom_rect(col = "grey10") +
+  # scale_fill_brewer(palette = 4) +
+  coord_polar(theta = "y") +
+  xlim(c(1, 4)) +
+  labs(
+    title = "Departments with the most redeemed coupons",
+    subtitle = "Over 70% of coupons are used on Groceries",
+    fill = NULL
+  ) +
+  scale_fill_manual(values = c("#495867", "#2a9d8f", "#e9c46a", "#e9c46a", "#f4a261")) +
+  theme_void() +
+  theme(
+    text = element_text(family = "Lato"),
+    legend.position = c(0.53, 0.5),
+    legend.text.align = 0,
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5)
+  )
+
+plot_5
+```
+
+
+## Correlation
+
+In here, we are trying to see if there's any correlation between the duration of a campaign and the quantity of purchases.
+
+```{r}
+sample_tbl <-
+  coupon_sales_tbl %>%
+  select(campaign, quantity, sales_value)
+
+get_total_quantity <- function(x) {
+  sample_tbl %>%
+    filter(campaign == x) %>%
+    summarize(total_quantity = sum(quantity)) %>%
+    pull(total_quantity)
+}
+```
+
+```{r}
+duration_quantity <-
+  campaign_desc_tbl %>%
+  mutate(duration = end_day - start_day) %>%
+  select(-ends_with("_day")) %>%
+  mutate(total_quantity = map_dbl(campaign, get_total_quantity))
+```
+
+With a correlation of 0.032 and a p-value of 0.8632, there's isn't any correlation between length of campaign and quantity of products bought
+
+```{r}
+cor.test(duration_quantity$duration, duration_quantity$total_quantity)
+```
+
+## Cohort Analysis
+
+```{r}
+tranx_data_long <-
+  cohort_tbl %>%
+  cohort_table_month(household_key, date) %>%
+  shift_left_pct() %>%
+  pivot_longer(-cohort) %>%
+  mutate(time = as.numeric(str_remove(name, "t")))
+
+plot_2 <-
+  tranx_data_long %>%
+  filter(value > 0, cohort <= 7, time > 0) %>%
+  mutate(line_type = ifelse(cohort %in% 1:4, "yes", "no")) %>%
+  ggplot(aes(time, value, colour = factor(cohort), group = cohort)) +
+  geom_line(aes(lty = line_type), alpha = 0.7, size = 0.9) +
+  labs(
+    title = "Cohort Analysis",
+    subtitle = "The retention rate for the first 4 cohorts are very high",
+    col = "Cohort",
+    y = "Retention rate",
+    x = "Time (months)"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_linetype_manual(values = c(3, 1)) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(size = 22)
+  ) +
+  guides(lty = "none")
+
+plot_2
+```
+
+## Association Rules Mining
+
+Preparing data for market basket analysis
+```{r}
+## Get product name
+# transaction_tbl <-
+#   tranx_tbl %>%
+#   left_join(product_tbl %>%
+#               select(product_id, sub_commodity_desc), by = "product_id")
+#
+# ## Converting to a transaction dataset
+# purchased_items <- dcast(
+#   setDT(
+#     transaction_tbl %>%
+#       group_by(basket_id) %>%
+#       select(basket_id, sub_commodity_desc) %>%
+#       distinct(sub_commodity_desc, .keep_all = TRUE)
+#   ),
+#   basket_id ~ rowid(basket_id)
+# ) %>%
+#   select(!basket_id)
+#
+# ## Saving data
+# write.csv(
+#   purchased_items,
+#   "purchased_items.csv",
+#   quote = FALSE,
+#   row.names = FALSE,
+#   col.names = FALSE,
+#   na =  ""
+# )
+
+## Loading data
+transaction <-
+  read.transactions("purchased_items.csv",
+    format = "basket",
+    sep = ","
+  )
+```
+
+```{r}
+itemFrequencyPlot(transaction,
+  topN = 25, type = "relative",
+  main = "Most Frequently Purchased Items",
+  ylab = "Relative Item Frequency", cex = 0.6
+)
+```
+
+```{r}
+plot_3 <-
+  coupon_sales_tbl %>%
+  count(sub_commodity_desc) %>%
+  mutate(perc = n / sum(n)) %>%
+  slice_max(order_by = perc, n = 20) %>%
+  mutate(sub_commodity_desc = fct_reorder(sub_commodity_desc, perc)) %>%
+  ggplot(aes(perc, sub_commodity_desc)) +
+  geom_segment(aes(x = 0, xend = perc, yend = sub_commodity_desc),
+    lineend = "butt"
+  ) +
+  geom_point(aes(size = perc), col = "#283618", show.legend = F) +
+  labs(
+    title = "Most frequently redeemed coupons",
+    subtitle = "About **72%** of the coupons redeemed were on Groceries, here are the top 20 products the copuons were redeemed on",
+    x = "Relative Coupon Use",
+    y = "",
+    fill = "",
+    col = ""
+  ) +
+  scale_x_continuous(labels = scales::percent) +
+  theme(
+    plot.subtitle = element_markdown(),
+    plot.title = element_text(size = 28),
+    plot.title.position = "plot"
+  )
+
+plot_3
+```
+
+Having a strict set of rules
+```{r}
+rules <-
+  apriori(transaction,
+    parameter = list(
+      supp = 0.01,
+      conf = 0.6,
+      minlen = 2,
+      maxlen = 4
+    )
+  )
+
+quality(rules)$improvement <- interestMeasure(rules, measure = "improvement")
+rules <- sort(rules, by = "improvement")
+inspect(rules[1:10])
+```
+
+```{r}
+# Finding redundancy
+redundant <- is.redundant(rules)
+rules_pruned <- rules[!redundant]
+rules_pruned <- sort(rules_pruned, by = "confidence")
+inspect(rules_pruned[1:10])
+```
+
+Having a more relaxed set of rules to get products that go with the most frequently redeemed coupons
+```{r}
+coupon_rules <-
+  apriori(transaction,
+    parameter = list(
+      supp = 0.003,
+      conf = 0.1,
+      minlen = 2,
+      maxlen = 3
+    )
+  )
+
+quality(coupon_rules)$improvement <-
+  interestMeasure(coupon_rules, measure = "improvement")
+coupon_rules <- sort(coupon_rules, by = "improvement")
+```
+
+```{r}
+# inspectDT(coupon_rules)
+```
+
+This is how you read the results,
+IF the items in LHS are purchased, THEN the item in RHS is purchased
